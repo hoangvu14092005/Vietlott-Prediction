@@ -24,7 +24,7 @@ from src.evaluator import LotteryEvaluator
 # --- CẤU HÌNH ---
 # Quan trọng: Đặt FORCE_RETRAIN = True cho lần chạy đầu tiên này 
 # để xóa bỏ model "ngu" (train bằng dummy data) và train lại bằng data thật.
-RUN_TUNING = False # chạy 1 lần rồi tắt đi
+RUN_TUNING = True # chạy 1 lần rồi tắt đi
 FORCE_RETRAIN = True 
 PAST_WINDOW = 100   # Nhìn lại 100 kỳ quá khứ
 TEST_SIZE = 50      # Dùng 50 kỳ cuối để kiểm tra độ chính xác
@@ -55,7 +55,6 @@ def main():
     # BƯỚC 2: FEATURE ENGINEERING (TẠO ĐẶC TRƯNG)
     # ------------------------------------------------------
     print("\n[2/5] ⚙️  FEATURE ENGINEERING")
-    print("   -> Đang tính toán tần suất, chu kỳ, cặp số...")
     
     feat_engine = UltraFeatureEngine(past_window=PAST_WINDOW)
     X, y = feat_engine.prepare_training_dataset(df)
@@ -63,23 +62,35 @@ def main():
     mlb = MultiLabelBinarizer(classes=range(1, 46))
     y_bin = mlb.fit_transform(y)
     
-    X_train, X_test = X[:-TEST_SIZE], X[-TEST_SIZE:]
-    y_train, y_test = y_bin[:-TEST_SIZE], y_bin[-TEST_SIZE:]
+    # --- CHIA DATA: TRAIN - VAL - TEST ---
+    # Test: 50 kỳ cuối
+    # Val:  50 kỳ trước Test (để Early Stopping)
+    # Train: Còn lại
+    VAL_SIZE = 50 
     
-    print(f"   -> Kích thước Train: {X_train.shape[0]} dòng | Test: {X_test.shape[0]} dòng")
+    X_full_train = X[:-TEST_SIZE]
+    y_full_train = y_bin[:-TEST_SIZE]
+    
+    X_test = X[-TEST_SIZE:]
+    y_test = y_bin[-TEST_SIZE:]
+    
+    # Chia tiếp Full Train thành Train và Val
+    X_train = X_full_train[:-VAL_SIZE]
+    y_train = y_full_train[:-VAL_SIZE]
+    X_val   = X_full_train[-VAL_SIZE:]
+    y_val   = y_full_train[-VAL_SIZE:]
+
+    print(f"   -> Data Splits:")
+    print(f"      + Train: {X_train.shape[0]} (Dùng để dạy Model)")
+    print(f"      + Val  : {X_val.shape[0]}   (Dùng để chỉnh Early Stopping)")
+    print(f"      + Test : {X_test.shape[0]}  (Dùng để kiểm tra cuối cùng)")
     
     # BƯỚC 2.5: HYPERPARAMETER TUNING (OPTUNA)
     if RUN_TUNING:
         print("\n[2.5] 🧪 HYPERPARAMETER TUNING (OPTUNA)")
-        print("   -> Đang tìm kiếm bộ tham số tốt nhất (Sẽ mất vài phút)...")
-        
-        # Khởi tạo Tuner với toàn bộ dữ liệu (nó sẽ tự chia Validation)
-        tuner = UltraTuner(X, y_bin) # Chú ý truyền y_bin (đã mã hóa one-hot)
-        
-        # Chạy 20 vòng thử nghiệm cho mỗi model (Tăng lên 50 nếu máy mạnh)
-        tuner.run_optimization(n_trials=20)
-        
-        print("   -> Đã Tuning xong! Các model sau đây sẽ dùng tham số mới.")
+        # Lưu ý: Tuner nên dùng X_full_train để tìm tham số tốt nhất
+        tuner = UltraTuner(X_full_train, y_full_train) 
+        tuner.run_optimization(n_trials=10)
 
     # ------------------------------------------------------
     # BƯỚC 3: MODEL TRAINING (HUẤN LUYỆN)
@@ -87,11 +98,10 @@ def main():
     print("\n[3/5] 🧠 MODEL FACTORY")
     manager = UltraModelManager(model_path="data/ultra_ensemble_v4.pkl")
     
-    model_file_exists = os.path.exists(manager.model_path)
-    
-    if FORCE_RETRAIN or not model_file_exists:
-        print("   ⚠️  Phát hiện yêu cầu Retrain hoặc chưa có Model. Đang huấn luyện lại...")
-        manager.train_all(X_train, y_train)
+    if FORCE_RETRAIN or not os.path.exists(manager.model_path):
+        print("   ⚠️  Phát hiện yêu cầu Retrain. Đang huấn luyện lại...")
+        # TRUYỀN THÊM X_val, y_val VÀO ĐÂY
+        manager.train_all(X_train, y_train, X_val, y_val)
     else:
         print("   ✅ Đã tìm thấy Model cũ. Đang tải lên...")
         manager.load_models()

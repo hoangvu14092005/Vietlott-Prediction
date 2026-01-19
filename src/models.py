@@ -33,51 +33,42 @@ class UltraModelManager:
             return {}
 
     def build_models(self):
-        """
-        Defines the architecture of the ensemble.
-        """
         print("🔨 [Model Factory] Đang khởi tạo Models...")
-        
-        # Tải tham số tối ưu (nếu có)
         best = self.load_best_params()
         
-        # 1. LightGBM (Fix lỗi trùng verbose)
-        p_lgb = best.get('lgb', {'n_estimators': 300, 'learning_rate': 0.05})
-        # Gán cứng verbose vào dict để tránh lỗi, và xóa tham số trong hàm khởi tạo
+        # 1. LightGBM
+        p_lgb = best.get('lgb', {'n_estimators': 500, 'learning_rate': 0.03, 'num_leaves': 31})
         p_lgb['verbose'] = -1
-        p_lgb['early_stopping_rounds'] = 50
-        self.models['lgb'] = MultiOutputClassifier(
-            LGBMClassifier(**p_lgb, random_state=42)
-        )
+        # LƯU Ý: Xóa early_stopping_rounds trong param khởi tạo để tránh lỗi với MultiOutput
+        if 'early_stopping_rounds' in p_lgb: del p_lgb['early_stopping_rounds']
+            
+        self.models['lgb'] = MultiOutputClassifier(LGBMClassifier(**p_lgb, random_state=42))
         
-        # 2. XGBoost (Fix lỗi trùng verbosity)
-        p_xgb = best.get('xgb', {'n_estimators': 300, 'max_depth': 6})
-        p_xgb['verbosity'] = 0 
+        # 2. XGBoost
+        p_xgb = best.get('xgb', {'n_estimators': 500, 'max_depth': 6, 'learning_rate': 0.03})
+        p_xgb['verbosity'] = 0
         p_xgb['tree_method'] = 'hist'
-        p_xgb['reg_alpha'] = 0.1  # L1 regularization
-        p_xgb['reg_lambda'] = 0.1  # L2 regularization
-        self.models['xgb'] = MultiOutputClassifier(
-            XGBClassifier(**p_xgb, random_state=42)
-        )
+        # Xóa early_stopping_rounds
+        if 'early_stopping_rounds' in p_xgb: del p_xgb['early_stopping_rounds']
+
+        self.models['xgb'] = MultiOutputClassifier(XGBClassifier(**p_xgb, random_state=42))
         
-        # 3. CatBoost (Fix lỗi trùng verbose)
-        p_cat = best.get('cat', {'iterations': 300, 'depth': 6, 'learning_rate': 0.05})
+        # 3. CatBoost
+        p_cat = best.get('cat', {'iterations': 500, 'depth': 6, 'learning_rate': 0.03})
         p_cat['verbose'] = 0
         p_cat['allow_writing_files'] = False
-        p_cat['early_stopping_rounds'] = 50
-        self.models['cat'] = MultiOutputClassifier(
-            CatBoostClassifier(**p_cat, random_state=42)
-        )
+        # Xóa early_stopping_rounds
+        if 'early_stopping_rounds' in p_cat: del p_cat['early_stopping_rounds']
+
+        self.models['cat'] = MultiOutputClassifier(CatBoostClassifier(**p_cat, random_state=42))
         
-        # 4. Random Forest
-        self.models['rf'] = RandomForestClassifier(n_estimators=200, max_depth=10, n_jobs=-1, random_state=42)
+        # 4. Random Forest (Giữ nguyên)
+        self.models['rf'] = RandomForestClassifier(n_estimators=300, max_depth=12, n_jobs=-1, random_state=42)
 
-        # 5. Logistic Regression
-        self.models['lr'] = MultiOutputClassifier(
-            LogisticRegression(solver='liblinear', random_state=42)
-        )
+        # 5. Logistic Regression (Giữ nguyên)
+        self.models['lr'] = MultiOutputClassifier(LogisticRegression(solver='liblinear', random_state=42))
 
-        # 6. TabNet
+        # 6. TabNet (Native Multi-task -> Hỗ trợ tốt Validation)
         self.models['tab'] = TabNetMultiTaskClassifier(
             verbose=0, 
             optimizer_params=dict(lr=0.02),
@@ -85,44 +76,55 @@ class UltraModelManager:
         )
 
     def train_all(self, X_train, y_train, X_val=None, y_val=None):
-        """Trains all models with optional validation set for early stopping."""
         if not self.models:
             self.build_models()
             
         print(f"🚀 [Training] Bắt đầu huấn luyện trên {X_train.shape[0]} mẫu...")
         
-        # Tính trọng số mặc định (có thể cập nhật sau khi đánh giá)
+        # Chuyển đổi dữ liệu sang float32 cho TabNet (tránh lỗi pytorch)
+        X_train_Tab = X_train.astype(np.float32)
+        y_train_Tab = y_train.astype(np.float32)
+        if X_val is not None:
+            X_val_Tab = X_val.astype(np.float32)
+            y_val_Tab = y_val.astype(np.float32)
+
         default_weight = 1.0 / len(self.models)
         
         for name, model in self.models.items():
             print(f"   ⮞ Training {name.upper()}...", end=" ")
             try:
+                # --- TABNET (Xử lý riêng vì hỗ trợ native validation) ---
                 if name == 'tab':
-                    model.fit(X_train, y_train, max_epochs=50, batch_size=128, virtual_batch_size=64)
-                elif name == 'lgb' and X_val is not None:
-                    # LightGBM với early stopping
-                    model.fit(X_train, y_train, 
-                             eval_set=[(X_val, y_val)],
-                             verbose=False)
-                elif name == 'cat' and X_val is not None:
-                    # CatBoost với early stopping
-                    model.fit(X_train, y_train,
-                             eval_set=(X_val, y_val),
-                             verbose=False)
+                    if X_val is not None:
+                        model.fit(
+                            X_train_Tab, y_train_Tab,
+                            eval_set=[(X_val_Tab, y_val_Tab)],
+                            patience=15, max_epochs=100, # TabNet dùng patience thay vì early_stopping_rounds
+                            batch_size=128, virtual_batch_size=64
+                        )
+                    else:
+                        model.fit(X_train_Tab, y_train_Tab, max_epochs=50)
+
+                # --- CÁC MODEL WRAPPER (LGBM, XGB, CAT, RF, LR) ---
+                # Vì dùng MultiOutputClassifier nên ta KHÔNG truyền eval_set vào đây
+                # để tránh lỗi dimension mismatch. Ta train full số trees.
                 else:
                     model.fit(X_train, y_train)
+                
                 print("✅ Done.")
                 self.model_weights[name] = default_weight
+            
             except Exception as e:
                 print(f"❌ Failed: {e}")
-                self.model_weights[name] = 0.0  # Không dùng model lỗi
+                import traceback
+                traceback.print_exc() # In chi tiết lỗi để debug
+                self.model_weights[name] = 0.0
 
-        # Chuẩn hóa trọng số
-        total_weight = sum(self.model_weights.values())
-        if total_weight > 0:
-            for name in self.model_weights:
-                self.model_weights[name] /= total_weight
-
+        # Cân bằng trọng số
+        total = sum(self.model_weights.values())
+        if total > 0:
+            for k in self.model_weights: self.model_weights[k] /= total
+            
         self.save_models()
 
     def predict_ensemble(self, X_input, return_individual=False):
