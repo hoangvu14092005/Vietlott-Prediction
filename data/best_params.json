@@ -1,0 +1,28 @@
+{
+    "xgb": {
+        "n_estimators": 129,
+        "max_depth": 8,
+        "learning_rate": 0.2057,
+        "subsample": 0.61,
+        "colsample_bytree": 0.99,
+        "tree_method": "hist",
+        "n_jobs": -1,
+        "verbosity": 0
+    },
+    "lgb": {
+        "n_estimators": 123,
+        "learning_rate": 0.0256,
+        "num_leaves": 71,
+        "feature_fraction": 0.66,
+        "verbose": -1,
+        "n_jobs": -1
+    },
+    "cat": {
+        "iterations": 312,
+        "depth": 4,
+        "learning_rate": 0.2667,
+        "l2_leaf_reg": 4.3,
+        "verbose": 0,
+        "allow_writing_files": false
+    }
+}
